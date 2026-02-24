@@ -1,349 +1,179 @@
-# Hook Testing Guide
+# plankton
 
-Testing reference for the Claude Code hooks in `.claude/hooks/`.
-Architecture and runtime docs live in [docs/REFERENCE.md](../REFERENCE.md).
+![Plankton mascot](assets/plankton-cover.png)
 
-## Self-Test Suite
+Write-time code quality enforcement for AI coding agents, built on Claude Code hooks.
 
-The `--self-test` flag runs automated tests covering all hooks:
+> [!CAUTION]
+> Research project under active development. Hooks are tested against
+> Claude Code >= 2.1.50 (see badge). Newer CC versions usually work
+> but are not guaranteed. **Disable CC auto-updates** to prevent
+> silent breakage (see Quick Start). If you encounter issues, file a
+> report including the output of `claude --version`. To pin to a
+> specific Plankton version: `git checkout v0.1.0`.
+
+## quick start
 
 ```bash
+git clone https://github.com/alexfazio/plankton.git
+cd plankton
+pip install uv && uv sync --all-extras
+claude                # hooks activate automatically
+```
+
+That's it. Plankton works by being the directory you run Claude Code from.
+The hooks in `.claude/hooks/` are picked up automatically — no install
+command, no plugin, no config. Clone, cd, claude.
+
+> [!TIP]
+> You can work on any codebase from inside plankton. Just tell Claude:
+> *"work on /path/to/my-project"* — it will apply the same quality
+> enforcement to that codebase while the hooks stay active.
+
+<!-- -->
+
+> [!NOTE]
+> **Existing codebases:** the agent edits a file, Plankton enforces every
+> violation in it, pre-existing included. Messy files get cleaned up on first
+> touch. After that, they're fast. Scope it down with exclusions:
+>
+> ```json
+> "exclusions": ["tests/", "legacy/", "vendor/", "node_modules/"]
+> ```
+
+**Recommended: disable Claude Code auto-updates.** Plankton depends on
+undocumented CC internals — a silent auto-update can break hooks without
+warning.
+
+```bash
+# Option A: disable auto-updates entirely (most reliable)
+echo 'export DISABLE_AUTOUPDATER=1' >> ~/.zshrc && source ~/.zshrc
+
+# Option B: use the stable channel (~1 week behind latest, fewer regressions)
+curl -fsSL https://claude.ai/install.sh | bash -s stable
+```
+
+`jaq`, `ruff`, and `uv` are required for all languages. TypeScript also
+needs `biome`. Everything else is optional and gracefully skipped if not
+installed. See [docs/SETUP.md](docs/SETUP.md) for per-language setup.
+
+## what is plankton
+
+Code quality gate enforcement at write-time, using Claude Code hooks. The
+agent is blocked from proceeding until its output passes your checks —
+style, types, security, complexity — all enforced before commits and code
+review.
+
+- **Higher pass rate** — write-time feedback catches bugs, type errors,
+  and anti-patterns that would otherwise cause test failures.
+- **Behavioral shift** — with Plankton active, the model learns from
+  write-time feedback and produces better code *during* generation,
+  not just through post-hoc formatting.
+- **Compound quality** — improvements across multiple dimensions
+  compound into code that is more likely to be functionally correct.
+
+For the full motivation and design story, read the
+[original writeup](https://x.com/alxfazio/status/2024931367612743688).
+
+## verify
+
+```bash
+# Install pre-commit hooks (optional but recommended)
+uv run pre-commit install
+
+# Run the hook self-test suite
 .claude/hooks/test_hook.sh --self-test
 ```
 
-### Multi-Linter Tests
-
-**Dockerfile patterns**:
-
-- `*.dockerfile` extension (valid content, expect pass)
-- `*.dockerfile` extension (missing labels, expect fail)
-
-**Other file types**:
-
-- Python, Shell, JSON (valid), JSON (invalid), YAML
-
-**Styled output format tests**:
-
-- JSON violations output (`JSON_SYNTAX` code present)
-- Dockerfile violations captured (`DL[0-9]+` codes present)
-
-**Model selection tests**:
-
-- Simple violation (F841) -> haiku
-- Complexity violation (C901) -> sonnet
-- Many violations (>5) -> opus
-- Docstring violation (D103) -> sonnet
-
-**TypeScript tests** (gated on Biome availability):
-
-- Clean TS file -> exit 0
-- TS unused variable -> exit 2
-- JS clean file -> exit 0
-- JSX a11y violation -> exit 2
-- TS disabled -> exit 0 (skip)
-- CSS clean -> exit 0
-- CSS violation -> exit 2
-- TS violations output contains `biome`
-- Protected biome.json -> block
-- TS simple -> haiku model
-- TS >5 violations -> opus model
-- JSON via Biome (D6) -> exit 0
-- Biome not installed -> exit 0 (fallback)
-- SFC (.vue) warning when semgrep absent
-- D3 oxlint overlap: nursery rules skipped when oxlint enabled
-
-### Package Manager Enforcement Tests
-
-**Python (block mode)**:
-
-- `pip install`, `pip3 install`, `python -m pip`, `python3 -m pip` blocked
-- `python -m venv` blocked (suggests `uv venv`)
-- `poetry add/install/run/lock/show/env` blocked
-- `pipenv install/run/graph` blocked, bare `pipenv` blocked
-- `uv pip` passthrough approved, `uv add` approved
-- `pip freeze/list` blocked with specific replacements
-- `pip install -e .` blocked (suggests `uv pip install -e .`)
-- `pip download` allowed (in allowlist)
-- Compound: `cd /app && pip install flask` blocked
-- Diagnostics: `pip --version`, `poetry --help` approved
-
-**JavaScript (block mode)**:
-
-- `npm install/run/test/start/exec/init/uninstall` blocked
-- `npx` blocked (suggests `bunx`)
-- `yarn add/install/run/remove` blocked, bare `yarn` blocked
-- `pnpm add/install/run/remove` blocked, bare `pnpm` blocked
-- `npm audit/view/pack/publish/whoami/login` allowed (in allowlist)
-- `yarn audit/info`, `pnpm audit/info` allowed
-- `npm -g install` blocked (flag-before-subcommand parsing)
-- `npm --registry=url audit` allowed (flag+allowlist)
-- `bun add`, `bunx` passthrough approved
-- Compound: `npm install && npm run build` blocked
-- Cross-ecosystem: `pip install && npm install` blocked
-- Diagnostics: `npm --version` approved
-
-**Config toggle tests**:
-
-- Python disabled (`"python": false`) -> pip install approved
-- JavaScript disabled (`"javascript": false`) -> npm install approved
-
-**Warn mode tests**:
-
-- `pip install` in warn mode -> approved + `[hook:advisory]` to stderr
-- `npm install` in warn mode -> approved + `[hook:advisory]` to stderr
-- Warn + allowlist: `npm audit` still approved (no advisory)
-- Warn + diagnostic: `pip --version` still approved
-- Compound warn: `cd /app && pip install` -> advisory emitted
-- Warn message format includes specific replacement command
-
-**Bypass and edge cases**:
-
-- `HOOK_SKIP_PM=1` -> all commands approved
-- Non-package commands (`ls -la`) -> approved
-- `jaq` missing -> fail-open (approve)
-- `uv` missing -> block + `[hook:warning]` about missing replacement
-- `bun` missing -> block + `[hook:warning]` about missing replacement
-- `HOOK_DEBUG_PM=1` -> debug output emitted to stderr
-
-**Compound command tests**:
-
-- `uv pip + pip` compound (known limitation: uv pip passthrough approves
-  whole command)
-- `npm diag + npm install` -> blocked (regex finds second `npm install`)
-- `pip diag + poetry add` -> blocked (independent poetry block)
-- `pipenv diag + pipenv install` -> blocked
-- `pip diag + pipenv install` -> blocked (cross-tool)
-- `poetry diag + poetry add` -> blocked
-
-Tests use temp files for content creation and `CLAUDE_PROJECT_DIR` override
-for TypeScript-enabled config isolation.
-
-## Testing Hooks Manually
-
-### Test PostToolUse hook (multi_linter.sh)
-
-```bash
-# Test Python handler (should exit 0 for clean file)
-echo 'def foo(): pass' > /tmp/test.py
-echo '{"tool_input": {"file_path": "/tmp/test.py"}}' \
-  | bash .claude/hooks/multi_linter.sh
-echo "Exit: $?"
-
-# Test with violations - use HOOK_SKIP_SUBPROCESS for deterministic exit codes
-# Without it, subprocess would attempt fixes and exit code depends on success
-cat > /tmp/complex.py << 'EOF'
-def f(a,b,c,d,e,f,g,h,i,j,k):
-    if a: return b
-EOF
-echo '{"tool_input": {"file_path": "/tmp/complex.py"}}' \
-  | HOOK_SKIP_SUBPROCESS=1 bash .claude/hooks/multi_linter.sh
-echo "Exit: $?"  # Exit 2 (violations reported, subprocess skipped)
-```
-
-### Test PreToolUse hook (protect_linter_configs.sh)
-
-```bash
-# Protected linter config (should return decision: block)
-echo '{"tool_input": {"file_path": ".yamllint"}}' \
-  | bash .claude/hooks/protect_linter_configs.sh
-# Expected: {"decision": "block", "reason": "Protected linter config file..."}
-
-# Protected hook script (should return decision: block)
-echo '{"tool_input": {"file_path": ".claude/hooks/multi_linter.sh"}}' \
-  | bash .claude/hooks/protect_linter_configs.sh
-# Expected: {"decision": "block", "reason": "Protected Claude Code config..."}
-
-# Protected settings (should return decision: block)
-echo '{"tool_input": {"file_path": ".claude/settings.json"}}' \
-  | bash .claude/hooks/protect_linter_configs.sh
-# Expected: {"decision": "block", "reason": "Protected Claude Code config..."}
-
-# Normal file (should return decision: approve)
-echo '{"tool_input": {"file_path": "/tmp/normal.py"}}' \
-  | bash .claude/hooks/protect_linter_configs.sh
-# Expected: {"decision": "approve"}
-```
-
-### Test Stop hook (stop_config_guardian.sh)
-
-```bash
-# No modifications - should approve
-echo '{"stop_hook_active": false}' | bash .claude/hooks/stop_config_guardian.sh
-# Expected: {"decision": "approve"}
-
-# With modifications (first invocation) - should block
-echo "# test" >> .yamllint
-echo '{"stop_hook_active": false}' | bash .claude/hooks/stop_config_guardian.sh
-# Expected: {"decision": "block", "reason": "...", "systemMessage": "..."}
-
-# Loop prevention (second invocation) - should approve
-echo '{"stop_hook_active": true}' | bash .claude/hooks/stop_config_guardian.sh
-# Expected: {"decision": "approve"}
-
-# Restore after test
-git checkout -- .yamllint
-```
-
-### Integration test (requires session restart)
-
-1. Start new Claude Code session
-2. Approve an edit to a protected config file
-3. End session (Ctrl+C or /exit)
-4. Stop hook should trigger, asking to restore
-5. Choose "Yes, restore" or "No, keep"
-
-## Testing Environment Variables
-
-| Variable | Purpose | Used By |
-| --- | --- | --- |
-| `HOOK_SKIP_SUBPROCESS` | Skip delegation, report directly | multi_linter.sh |
-| `HOOK_DEBUG_MODEL` | Output model selection | multi_linter.sh |
-| `HOOK_SUBPROCESS_TIMEOUT` | Timeout for subprocess (300s) | multi_linter.sh |
-| `HOOK_SESSION_PID` | Session PID for temp file scoping | multi_linter.sh |
-| `HOOK_GUARD_PID` | Guard PID override | stop_cfg_guardian.sh, enforce_pm.sh |
-| `HOOK_SKIP_PM` | Bypass PM enforcement | enforce_package_managers.sh |
-| `HOOK_DEBUG_PM` | Log PM decisions to stderr | enforce_package_managers.sh |
-| `HOOK_LOG_PM` | Log PM decisions to file | enforce_package_managers.sh |
-
-Example usage:
-
-```bash
-# Test model selection without spawning subprocess
-echo '{"tool_input": {"file_path": "/tmp/test.py"}}' \
-  | HOOK_SKIP_SUBPROCESS=1 HOOK_DEBUG_MODEL=1 .claude/hooks/multi_linter.sh
-# Output: [hook:model] haiku
-```
-
-### Debug Output Locations
-
-There are **TWO** debug output blocks for model selection:
-
-1. **Inside `spawn_fix_subprocess()`** - Verbose format with counts:
-
-   ```text
-   [hook:model] haiku (count=3, opus_codes=false, sonnet_codes=false)
-   ```
-
-   Only reached during normal execution (when HOOK_SKIP_SUBPROCESS is not set).
-
-2. **Script-level (main flow)** - Simple format:
-
-   ```text
-   [hook:model] haiku
-   ```
-
-   Runs before HOOK_SKIP_SUBPROCESS check, allowing tests to verify model
-   selection without spawning subprocesses.
-
-## Integration Test Suite
-
-The hook system has a 103-test integration suite that exercises all four hooks
-via their real stdin/stdout contracts. The suite runs as three parallel agents
-using Claude Code's TeamCreate feature.
-
-**Specification**: [adr-hook-integration-testing.md](../specs/adr-hook-integration-testing.md)
-
-**Results**: [.claude/tests/hooks/results/RESULTS.md](../../.claude/tests/hooks/results/RESULTS.md)
-
-### Suite Structure
-
-| Agent | Hook Tested | Tests | Scope |
-| --- | --- | --- | --- |
-| `dep-agent` | Infrastructure | 29 | Dependencies + settings registration |
-| `ml-agent` | `multi_linter.sh` | 42 | All file types, configs, toggles |
-| `pm-agent` | `enforce_package_managers.sh` | 32 | Block/approve/compound/cfg |
-
-**Excluded hooks**: `protect_linter_configs.sh` is covered by the
-`test_hook.sh --self-test` suite. `stop_config_guardian.sh` requires an
-interactive session restart which cannot be triggered from a TeamCreate
-teammate context (teammates fire `TeammateIdle`, not `Stop`).
-
-### Two Test Layers
-
-- **Layer 1 (stdin/stdout)**: Pipe JSON to the hook script, capture exit
-  code and output. This is the real execution path -- identical to how Claude
-  Code delivers input to hooks.
-- **Layer 2 (live trigger)**: Invoke an actual tool call (Edit or Bash) and
-  observe whether the hook fires via the tool result.
-
-### Running the Suite
-
-The suite is orchestrated by the main agent following the
-[Orchestrator Playbook](../specs/adr-hook-integration-testing.md#orchestrator-playbook).
-Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` environment variable.
-
-```text
-Phase 0: Archive previous results, create team
-Phase 1: dep-agent pre-flight (DEP01-DEP29)
-Phase 2: ml-agent + pm-agent in parallel (M01-M42, P01-P32)
-Phase 3: Aggregate JSONL, write RESULTS.md
-Phase 4: Compare with archived previous run (if available)
-```
-
-Results are written as JSONL to `.claude/tests/hooks/results/` with one file
-per agent. The aggregation command (`jaq -s`) produces pass/fail/skip counts
-across all 103 tests.
-
-### Known Limitations
-
-**PreToolUse hooks do not fire for TeamCreate teammate Bash tool calls**:
-When a teammate agent uses the Bash tool, PreToolUse hooks registered in
-`.claude/settings.json` are not triggered. This means P28 (live trigger
-for `enforce_package_managers.sh`) cannot be validated in a teammate
-session. PostToolUse hooks DO fire for teammate Edit/Write tool calls
-(confirmed by M19). This is a Claude Code agent teams architecture
-constraint, not a hook defect -- all 31 direct invocation tests confirm
-the hook logic is correct.
-
-**subprocess-settings.json path**: The subprocess prevention settings file
-lives at `.claude/subprocess-settings.json` (user home directory). The
-integration test spec (DEP14) must check this path, not the project-local
-`.claude/subprocess-settings.json`. The hook auto-creates this file if
-missing (see [REFERENCE.md: Settings File Auto-Creation](../REFERENCE.md#settings-file-auto-creation)).
-
-**Stop hook untestable via TeamCreate**: The `stop_config_guardian.sh` hook
-fires on the `Stop` lifecycle event, which occurs at session end. TeamCreate
-teammates trigger `TeammateIdle` when they finish, not `Stop`. Testing the
-stop hook requires a manual session
-(see [Test Stop hook](#test-stop-hook-stop_config_guardiansh)).
-
-## Regression Testing After Hook Changes
-
-After modifying `.claude/hooks/multi_linter.sh`, run these tests
-to verify no regressions:
-
-1. **Self-test suite** (structural + functional):
-
-   ```bash
-   bash .claude/hooks/test_hook.sh --self-test
-   ```
-
-   Expected: 110+ pass, 2 known failures (Python valid file
-   detection, TS disabled skip counting).
-
-2. **Feedback loop verification** (all file types):
-
-   ```bash
-   bash .claude/tests/hooks/verify_feedback_loop.sh
-   ```
-
-   Expected: 28+ pass, 0 fail. Skips are OK for linters not
-   installed locally.
-
-3. **Production path** (subprocess delegation with mock):
-
-   ```bash
-   bash .claude/tests/hooks/test_production_path.sh
-   ```
-
-   Tests the full subprocess delegation flow using a mock
-   `claude` binary. No API access required.
-
-4. **Five-channel output verification**:
-
-   ```bash
-   bash .claude/tests/hooks/test_five_channels.sh
-   ```
-
-   Automated channel output tests. Use `--runbook` flag for
-   mitmproxy-based system-reminder delivery verification.
+## how it works
+
+Three phases run on every file edit: auto-format first (ruff, shfmt, biome,
+taplo, markdownlint), then collect remaining violations as structured JSON from
+20+ linters, then delegate what's left to dedicated Claude subprocesses that
+reason about each fix. Config files are tamper-proof — a PreToolUse hook blocks
+linter config edits before they happen. Model routing right-sizes intelligence
+to problem complexity so tokens aren't wasted on easy fixes.
+
+See [docs/REFERENCE.md](docs/REFERENCE.md) for the full architecture, message
+flows, and configuration reference. For the motivation and design story, read
+the [original writeup](https://x.com/alxfazio/status/2024931367612743688).
+
+## what it enforces
+
+Style enforcement covers formatting, import ordering, naming
+conventions, docstring format, quote style, indentation, trailing
+commas, modern syntax idioms (Python 3.11+ f-strings, modern type
+annotations). Most of this is handled silently by auto-formatting in
+Phase 1. You never see these violations because they're fixed before
+they're reported.
+
+Correctness checks catch unused variables, type errors (ty), dead
+code (vulture, Knip), security vulnerabilities (bandit, Semgrep),
+async anti-patterns (flake8-async), Pydantic model validation,
+duplicate code detection (jscpd), ShellCheck semantic analysis with
+all optional checks enabled, Dockerfile best practices (hadolint at
+maximum strictness), YAML strictness with all 23 yamllint rules
+configured. Phase 2 linters catch these; Phase 3 Claude instances
+fix them.
+
+Architectural constraints are emerging: complexity limits (cyclomatic
+complexity, max arguments, max nesting depth, max statements per
+function), package manager compliance (blocks pip/npm/yarn, enforces
+uv/bun), config file protection with tamper-proof defense. These
+shape how code is organized rather than how it looks.
+
+## configuration
+
+`.claude/hooks/config.json` controls everything: language toggles, phase
+control, model routing patterns, protected files, exclusions, jscpd
+thresholds, package manager enforcement modes. If the file is missing, all
+features are enabled with sensible defaults. Environment variables
+(`HOOK_SKIP_SUBPROCESS=1`, `HOOK_SUBPROCESS_TIMEOUT`) override config values
+for quick session-level tweaks. Every rule is customizable. Configure what
+gets enforced, how strictly, and for which languages. Full configuration
+reference in [docs/REFERENCE.md](docs/REFERENCE.md).
+
+## faq
+
+See [docs/FAQ.md](docs/FAQ.md) for answers to common questions: how this
+differs from pre-commit hooks, whether models will make this unnecessary, why
+agents modify linting rules, and more.
+
+## todos
+
+- should have an install wizard instead of manual setup, a guided script that
+  detects your stack and configures everything
+- one-click install via Claude Code marketplace would be nice
+- a Claude Code skill for configuration and troubleshooting from inside a
+  session
+- Swift and Go are next
+- model routing currently assumes Anthropic models, need to support any model
+  Claude Code supports (Qwen, DeepSeek, Gemini, etc.) with a generic
+  three-tier system users map to their provider
+- per-directory rule overrides, team config profiles
+- extend beyond code to catch AI writing slop in docs and READMEs
+  ([slop-guard](https://github.com/eric-tramel/slop-guard) integration)
+- `multi_linter.sh` is ~1,300 lines and should split into one file per hook type
+- 103-test integration suite exists but needs work; Claude subprocess
+  stochasticity makes deterministic assertions hard
+- measuring LLM+Plankton vs LLM-alone would be useful but needs benchmarking
+  expertise, contributions welcome here
+
+Contributions are welcome.
+
+## star history
+
+<!-- markdownlint-disable MD033 MD013 -->
+<a href="https://star-history.com/#alexfazio/plankton&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=alexfazio/plankton&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=alexfazio/plankton&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=alexfazio/plankton&type=Date" />
+ </picture>
+</a>
+<!-- markdownlint-enable MD013 -->
+<!-- markdownlint-enable MD033 -->
+
+## license
+
+MIT
